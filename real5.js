@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.1",
+  version: "1.6.2",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -10,8 +10,9 @@ WidgetMetadata = {
   globalParams: [
     { name: "extraSourcesMode", title: "补充播放源", type: "enumeration", value: "on", description: "追加18个直连补充源（合计21个，覆盖国漫/国产剧/电影/韩剧/美剧/日漫/综艺）和已核验云盘条目；保留原有配置", enumOptions: [ { title: "开启（更多线路）", value: "on" }, { title: "关闭（只用原有源）", value: "off" } ] },
     { name: "playbackPreference", title: "播放偏好", type: "enumeration", value: "quality", description: "默认优先源文件标注的 4K/HDR，不转码、不删除其他画质", enumOptions: [ { title: "4K / 原画优先", value: "quality" }, { title: "流畅优先（小文件）", value: "smooth" } ] },
-    { name: "directProviderUrls", title: "直连采集源", type: "input", description: "每行一个：名称|MacCMS API 地址；留空则用内置 21 个已实测源", value: "播剧网|https://ysxq.cc/api.php/provide/vod/\niBox采集A|http://149.104.6.155:12121/api.php/provide/vod/\niBox采集B|http://38.76.166.26:7788/api.php/provide/vod/" },
+    { name: "directProviderUrls", title: "直连采集源", type: "input", description: "每行一个：名称|MacCMS API 地址；留空则用内置 10 个已实测可播源（另有 7 个备用源随「补充播放源」开关加入）", value: "" },
     { name: "baiduCookie", title: "百度 Cookie / Token", type: "input", description: "包含 BDUSS 和 STOKEN 的百度网盘 Cookie" },
+    { name: "parseEndpoints", title: "官方平台解析接口", type: "input", description: "可选。每行一个：名称|https://解析接口/?url=  ；留空则不做官方平台解析", value: "" },
     { name: "providerUrls", title: "云盘资源站", type: "input", description: "每行一个：名称|MacCMS站点地址", value: "小虎|http://103.40.14.172:12512" },
     { name: "embyServers", title: "私人媒体服务器", type: "input", description: "每行一个：名称|https://服务器地址|API令牌（公开服务器可留空令牌）" },
   ],
@@ -1484,12 +1485,25 @@ async function loadBrowse(params) {
 }
 
 function macProviders(value, extraMode) {
-  var defaults = "播剧网|https://ysxq.cc/api.php/provide/vod/\niBox采集A|http://149.104.6.155:12121/api.php/provide/vod/\niBox采集B|http://38.76.166.26:7788/api.php/provide/vod/";
+  var defaults = "极速资源|https://jszyapi.com/api.php/provide/vod/\n金鹰资源|https://jyzyapi.com/api.php/provide/vod/\n光速资源|https://api.guangsuapi.com/api.php/provide/vod/\n虎牙资源|https://www.huyaapi.com/api.php/provide/vod/\n红牛资源|https://www.hongniuzy2.com/api.php/provide/vod/\n速播资源|https://subocaiji.com/api.php/provide/vod/\n魔都资源|https://caiji.moduapi.cc/api.php/provide/vod/\n360资源|https://360zyzz.com/api.php/provide/vod/\n闪电资源|https://sdzyapi.com/api.php/provide/vod/\n播剧网|https://ysxq.cc/api.php/provide/vod/";
   var providers=parseProviders(String(value||"").trim()||defaults);
   if(extraMode!=="off"){
     var additional=parseProviders("非凡资源|https://api.ffzyapi.com/api.php/provide/vod/\n天涯资源|https://tyyszy.com/api.php/provide/vod/\n如意资源|https://cj.rycjapi.com/api.php/provide/vod/\n量子资源|https://cj.lziapi.com/api.php/provide/vod/\n魔都资源|https://caiji.moduapi.cc/api.php/provide/vod/\n暴风资源|https://bfzyapi.com/api.php/provide/vod/\n360资源|https://360zyzz.com/api.php/provide/vod/\n闪电资源|https://sdzyapi.com/api.php/provide/vod/\n无尽资源|https://api.wujinapi.com/api.php/provide/vod/\n优酷资源|https://api.ukuapi.com/api.php/provide/vod/\n红牛资源|https://www.hongniuzy2.com/api.php/provide/vod/\n速播资源|https://subocaiji.com/api.php/provide/vod/\n金鹰资源|https://jyzyapi.com/api.php/provide/vod/\n光速资源|https://api.guangsuapi.com/api.php/provide/vod/\n虎牙资源|https://www.huyaapi.com/api.php/provide/vod/\n豪华资源|https://hhzyapi.com/api.php/provide/vod/\n极速资源|https://jszyapi.com/api.php/provide/vod/\n多多资源|https://api.ddapi.cc/api.php/provide/vod/");
-    additional.forEach(function(provider){provider.timeoutMs=6000;providers.push(provider);});
+    // 2026-11 实测剔除：lziapi 返回 404、tyyszy 超时且返回体异常。
+    var DROPPED=/(lziapi|tyyszy|149\.104\.6\.155|38\.76\.166\.26)/i;
+    additional=additional.filter(function(provider){return !DROPPED.test(provider.baseUrl);});
+    additional.forEach(function(provider){providers.push(provider);});
   }
+  // 实测可播与响应速度排序：跨源匹配只取前 12 个，顺序即优先级。
+  var RANK=["jszyapi","jyzyapi","guangsuapi","huyaapi","hongniuzy2","subocaiji","caiji.moduapi.cc","360zyzz","sdzyapi","hhzyapi","bfzyapi","wujinapi","ukuapi","ysxq","ddapi","rycjapi","ffzyapi"];
+  providers.forEach(function(provider){
+    var host=String(provider.baseUrl||"").toLowerCase(),rank=RANK.length;
+    for(var i=0;i<RANK.length;i++){if(host.indexOf(RANK[i])>=0){rank=i;break;}}
+    provider._rank=rank;
+    // 慢源单独放宽超时：实测 bfzyapi/ffzyapi 常在 20-45s 才返回首包。
+    provider.timeoutMs=provider.timeoutMs||(/bfzyapi|ffzyapi|ddapi|rycjapi/.test(host)?18000:9000);
+  });
+  providers.sort(function(a,b){return (a._rank===undefined?99:a._rank)-(b._rank===undefined?99:b._rank);});
   var seen={};return providers.filter(function(provider){var key=provider.baseUrl.replace(/\/+$/,"").toLowerCase();if(seen[key])return false;seen[key]=true;return true;});
 }
 
@@ -1615,21 +1629,88 @@ async function loadMacDetail(context) {
     link:encodeCloudLink(context),episodeItems:episodes};
 }
 
+var OFFICIAL_HOSTS=/(^|\.)(iqiyi\.com|qiyi\.com|v\.qq\.com|qq\.com|youku\.com|mgtv\.com|sohu\.com|le\.com|bilibili\.com|1905\.com|pptv\.com|wasu\.cn|acfun\.cn)$/i;
+function isOfficialPlatformUrl(url) {
+  var host=(/^https?:\/\/([^/:]+)/i.exec(String(url||""))||[])[1]||"";
+  return !!host && OFFICIAL_HOSTS.test(host);
+}
+
+function buildParserUrl(endpointUrl, officialUrl) {
+  var base=String(endpointUrl||"").trim();
+  if(!/^https?:\/\//i.test(base)||/\s/.test(base))return null;
+  var encoded=encodeURIComponent(String(officialUrl||""));
+  if(/[?&]url=$/i.test(base))return base+encoded;
+  if(/[?&]url=/i.test(base))return base.replace(/([?&]url=)[^&]*$/i,"$1"+encoded);
+  return base+(base.indexOf("?")>=0?"&":"?")+"url="+encoded;
+}
+
+// 官方平台链接不走直连播放：交给用户配置的解析接口换成可播的 m3u8。
+// 注意：这里不用 parseProviders —— 它在空输入时会回落到内置云盘站，会把解析槽污染成错误目标。
+function parseParserEndpoints(value) {
+  var lines=String(value||"").split(/\r?\n/),list=[];
+  for(var i=0;i<lines.length;i++){
+    var line=lines[i].trim();if(!line)continue;
+    var separator=line.indexOf("|");
+    var name=separator>=0?line.slice(0,separator).trim():"解析";
+    var baseUrl=separator>=0?line.slice(separator+1).trim():line;
+    if(!/^https?:\/\//i.test(baseUrl)||/\s/.test(baseUrl))continue;
+    list.push({name:name||"解析",baseUrl:baseUrl});
+  }
+  return list;
+}
+
+async function resolveThroughParser(officialUrl, params) {
+  var endpoints=parseParserEndpoints(String((params&&params.parseEndpoints)||"").trim());
+  if(!endpoints.length)throw new Error("未配置官方平台解析接口");
+  var failures=[];
+  for(var i=0;i<endpoints.length&&i<3;i++){
+    var target=buildParserUrl(endpoints[i].baseUrl,officialUrl);
+    if(!target){failures.push(endpoints[i].name+": 地址格式无效");continue;}
+    try{
+      var media=await resolvePlayerPage(target);
+      if(media.length)return media.map(function(item){
+        item.description=(item.description||"官方平台解析线路")+" · "+endpoints[i].name;
+        return item;
+      });
+    }catch(error){failures.push(endpoints[i].name+": "+safeError(error));}
+  }
+  throw new Error("解析接口未返回可播地址；"+failures.join("；"));
+}
+
 async function loadMacResources(context, params) {
   if(context.kind==="maccms"){
     var detail=await loadMacDetail(context);var ep=Number(params.episode||1);var selected=null;
     for(var i=0;i<detail.episodeItems.length;i++)if(detail.episodeItems[i].episode===ep){selected=detail.episodeItems[i];break;}
     if(!selected)throw new Error("该资源暂时没有剧集");context=decodeCloudLink(selected.link);
   }
-  var resources=[],pages=[];
+  var resources=[],pages=[],official=[];
   for(var j=0;j<(context.streams||[]).length;j++){
     var stream=context.streams[j];
-    if(!isMediaAddress(stream.url)){pages.push(stream);continue;}
+    if(!isMediaAddress(stream.url)){
+      if(isOfficialPlatformUrl(stream.url)&&String((params&&params.parseEndpoints)||"").trim())official.push(stream);
+      else pages.push(stream);
+      continue;
+    }
     resources.push(makeWebResource(stream,stream.url,"源站直连"));
   }
   if(resources.length)return resources;
   if(params._directOnly)return [];
   var failures=[];
+  // 官方平台链接优先走解析接口，再退回网页解析。
+  if(official.length){
+    var parsedOfficial=await Promise.all(official.slice(0,2).map(async function(stream){
+      try{
+        var media=await resolveThroughParser(stream.url,params);
+        return media.map(function(item){
+          var resource=makeWebResource(stream,item.url,item.description||"官方平台解析线路",item.referer||stream.url);
+          if(item.label)resource.name+=" · "+item.label;
+          return resource;
+        });
+      }catch(error){failures.push(stream.name+": "+safeError(error));return [];}
+    }));
+    parsedOfficial.forEach(function(group){resources=resources.concat(group);});
+    if(resources.length)return resources;
+  }
   var fallbackJob=findCrossSourceMedia(context,params).catch(function(error){return [];});
   var groups=await Promise.all(pages.slice(0,3).map(async function(stream){
     try {
@@ -1757,12 +1838,26 @@ function parsePlayerPage(html,pageUrl) {
   var assignment=/\b(?:var|let|const)\s+(player_[A-Za-z0-9_]+)\s*=/g,match;
   while((match=assignment.exec(text))){
     var config=jsonAssignment(text,match[1]);if(!config||!config.url)continue;
-    var url=String(config.url);
-    try {
-      if(Number(config.encrypt)===2)url=decodeBase64PlayerUrl(url);
-      if(Number(config.encrypt)===1 || /^(?:https?%3a)/i.test(url))url=decodeURIComponent(url);
-      if(isMediaAddress(url))add(url);else if(/^https?:\/\//i.test(url))next.push(url);
-    }catch(error){}
+    var raw=String(config.url),candidates=[raw];
+    // encrypt 约定在采集站之间混用（1 与 2 都可能表示 base64 或 urlencode），两种解法都试。
+    try{var b64=decodeBase64PlayerUrl(raw);if(candidates.indexOf(b64)<0)candidates.push(b64);}catch(error){}
+    try{var decoded=decodeURIComponent(raw);if(candidates.indexOf(decoded)<0)candidates.push(decoded);}catch(error){}
+    var picked=null;
+    for(var ci=0;ci<candidates.length;ci++){if(isMediaAddress(candidates[ci])){picked=candidates[ci];break;}}
+    if(!picked&&/^https?:\/\//i.test(candidates[0]))picked=candidates[0];
+    if(!picked)continue;
+    if(isMediaAddress(picked))add(picked);else next.push(picked);
+  }
+  // 新版播放页外壳：const vid = 'https://…/play/xxx/index.m3u8'。不是对象，jsonAssignment 取不到。
+  var urlAssignment=/\b(?:var|let|const)\s+[A-Za-z_$][\w$]*\s*=\s*(["'])(https?:\/\/[^"'\s\\]{8,2000})\1/g,urlMatch;
+  while((urlMatch=urlAssignment.exec(text))){
+    var assigned=String(urlMatch[2]).replace(/\\\//g,"/");
+    if(isMediaAddress(assigned))add(assigned);
+  }
+  if(!media.length){
+    // 兜底：页面正文里出现的绝对媒体地址（广告媒体同样会被 isMediaAddress 拦掉非媒体后缀）
+    var looseMedia=/(https?:\/\/[^\s"'<>()\\]+?\.(?:m3u8|mp4|mkv|m4v|flv|ts))(?:\?[^\s"'<>()\\]*)?/gi,loose;
+    while((loose=looseMedia.exec(text)))add(String(loose[0]).replace(/\\\//g,"/"));
   }
   var videoPattern=/<video\b[^>]*>[\s\S]*?<\/video>/gi;
   while((match=videoPattern.exec(text))){
@@ -1793,6 +1888,14 @@ async function resolvePlayerPage(url) {
       var parsed=parsePlayerPage(asText(response.data),entry.url);
       if(parsed.media.length)return parsed.media;
       parsed.next.slice(0,2).forEach(function(next){queue.push({url:next,depth:entry.depth+1});});
+      if(!parsed.next.length && /\/play\/|\/vodplay\/|play\.php/i.test(entry.url)){
+        // 播放页外壳常见形态：真地址就是 <播放页>/index.m3u8，页面里不写出来
+        var guessed=entry.url.replace(/[?#][\s\S]*$/,"").replace(/\/+$/,"")+"/index.m3u8";
+        try{
+          var probe=await Widget.http.get(guessed,{headers:{"User-Agent":USER_AGENT,Referer:entry.url},timeout:8000});
+          if(asText(probe.data).indexOf("#EXTM3U")===0)return [{url:guessed,referer:entry.url,description:"播放页公开直链"}];
+        }catch(error){}
+      }
       if(!parsed.next.length)failures.push(host+" 没有公开可直接播放的媒体地址");
     }catch(error){failures.push(host+" "+safeError(error));}
   }
