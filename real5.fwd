@@ -1,0 +1,16 @@
+{
+  "title": "iBox 播放资源",
+  "description": "iBox 独立播放资源扩展",
+  "icon": "https://raw.githubusercontent.com/xueqianyi500-lgtm/forward-source/main/icon.png",
+  "widgets": [
+    {
+      "id": "ibox.cloud.live2",
+      "title": "iBox 播放资源",
+      "description": "iBox 独立播放资源扩展",
+      "requiredVersion": "0.0.1",
+      "version": "1.6.1",
+      "author": "ibox",
+      "url": "https://raw.githubusercontent.com/xueqianyi500-lgtm/forward-source/main/real5.js"
+    }
+  ]
+}
