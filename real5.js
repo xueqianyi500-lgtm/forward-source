@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.6",
+  version: "1.6.7",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -1900,23 +1900,25 @@ async function loadQuark4kResources(context, params) {
   var transfer = await transferQuarkShare(cookie, entry);
   console.log("[iBox165] quark4k transfer " + JSON.stringify({ task: !!transfer.taskId, files: transfer.fileCount }));
 
-  // 转存是异步任务：轮询到完成后定位目标目录内最新文件
-  var deadline = Date.now() + 90000;
+  // 转存是异步任务：轮询到完成后定位目标目录内文件。
+  // 注意：Forward 运行时（iOS JavaScriptCore）不提供 setTimeout，
+  // 因此不能用 Promise + 定时器等待，否则 App 直接闪退。
+  // 改为「有限次轮询」：文件通常数秒内出现，未出现则提示稍后从列表打开。
   var targetFid = "";
-  while (Date.now() < deadline) {
+  for (var attempt = 0; attempt < 3; attempt += 1) {
     var listing = await quarkGet(cookie, "/file/sort?pdir_fid=" + encodeURIComponent(transfer.destFid) +
       "&_page=1&_size=50&_fetch_total=1&_sort=file_type:asc,updated_at:desc");
     var list = (listing && listing.data && listing.data.list) || [];
     var videos = list.filter(function (f) { return !f.dir && QUARK_VIDEO_RE.test(String(f.file_name || "")); });
     if (videos.length) { targetFid = videos[0].fid; break; }
     if (transfer.taskId) {
-      var task = await quarkGet(cookie, "/task?task_id=" + encodeURIComponent(transfer.taskId) + "&retry_index=0");
+      var task = await quarkGet(cookie, "/task?task_id=" + encodeURIComponent(transfer.taskId) + "&retry_index=" + attempt);
       var state = Number((task && task.data && task.data.status) || 0);
       if (state === 3 || state === 4) throw new Error("夸克转存任务失败，请稍后重试");
+      if (state === 2) continue;
     }
-    await new Promise(function (r) { setTimeout(r, 2500); });
   }
-  if (!targetFid) throw new Error("转存已提交，但文件尚未出现，请稍后在「夸克网盘」列表查看");
+  if (!targetFid) throw new Error("已转存到「夸克影视」分类目录，请稍后在「私人片库」中打开播放");
 
   var streams = await resolveQuarkStreams(cookie, targetFid);
   if (!streams.length) throw new Error("夸克未返回可播流");
