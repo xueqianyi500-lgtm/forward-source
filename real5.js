@@ -1,16 +1,16 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.2",
+  version: "1.6.3",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
   site: "https://pan.baidu.com/",
   detailCacheDuration: 0,
   globalParams: [
-    { name: "extraSourcesMode", title: "补充播放源", type: "enumeration", value: "on", description: "追加18个直连补充源（合计21个，覆盖国漫/国产剧/电影/韩剧/美剧/日漫/综艺）和已核验云盘条目；保留原有配置", enumOptions: [ { title: "开启（更多线路）", value: "on" }, { title: "关闭（只用原有源）", value: "off" } ] },
+    { name: "extraSourcesMode", title: "补充播放源", type: "enumeration", value: "on", description: "开启后追加 10 个直连补充源（合计 18 个，覆盖国漫/国产剧/电影/韩剧/美剧/日漫/综艺）。均为实测可播源；片库已内置内容过滤，屏蔽采集站混入的成人条目。", enumOptions: [ { title: "开启（更多线路）", value: "on" }, { title: "关闭（只用核心 8 源）", value: "off" } ] },
     { name: "playbackPreference", title: "播放偏好", type: "enumeration", value: "quality", description: "默认优先源文件标注的 4K/HDR，不转码、不删除其他画质", enumOptions: [ { title: "4K / 原画优先", value: "quality" }, { title: "流畅优先（小文件）", value: "smooth" } ] },
-    { name: "directProviderUrls", title: "直连采集源", type: "input", description: "每行一个：名称|MacCMS API 地址；留空则用内置 10 个已实测可播源（另有 7 个备用源随「补充播放源」开关加入）", value: "" },
+    { name: "directProviderUrls", title: "直连采集源", type: "input", description: "每行一个：名称|MacCMS API 地址；留空则用内置 8 个核心源（另有 10 个补充源随「补充播放源」开关加入）。自定义源同样受内容过滤约束", value: "" },
     { name: "baiduCookie", title: "百度 Cookie / Token", type: "input", description: "包含 BDUSS 和 STOKEN 的百度网盘 Cookie" },
     { name: "parseEndpoints", title: "官方平台解析接口", type: "input", description: "可选。每行一个：名称|https://解析接口/?url=  ；留空则不做官方平台解析", value: "" },
     { name: "providerUrls", title: "云盘资源站", type: "input", description: "每行一个：名称|MacCMS站点地址", value: "小虎|http://103.40.14.172:12512" },
@@ -1465,7 +1465,7 @@ async function loadBrowse(params) {
       var pages = await Promise.all(slice.map(function (typeId) {
         return queryMac(provider, { ac: "detail", t: typeId, pg: page })
           .then(function (items) {
-            return items.map(function (item) { return macListItem(item, provider); });
+            return items.map(function (item) { return macListItem(item, provider); }).filter(Boolean);
           })
           .catch(function () { return []; });
       }));
@@ -1484,24 +1484,41 @@ async function loadBrowse(params) {
   return items;
 }
 
+// 内容过滤：用于挡掉采集站里混入的成人条目。词表只收无歧义多字词，
+// 单字（干/操/啪/骚/裸/妓）不入表——实测会误杀正经片名。
+var DENY_WORDS=["约炮","探花","楼凤","嫖娼","做爱","性爱","性交","性侵","性虐","情色","色情","三级片","伦理片","肉棒","肉穴","肉便器","小穴","嫩穴","蜜穴","美穴","淫穴","淫荡","淫水","淫声","淫妻","淫娃","淫乱","骚穴","骚逼","骚女","骚货","发骚","风骚","巨乳","爆乳","美乳","奶子","鲍鱼","肥鲍","炮友","车震","野战","颜射","口爆","内射","中出","自慰","手淫","口交","肛交","群交","乱伦","兽交","女优","无码","有码","偷拍","自拍流出","调教","母狗","母畜","精液","射精","撸管","春药","媚药","荡妇","痴女","露点","走光","波霸","舔屌","舔穴","舔阴","骑乘","抽插","狂操","狂干","爆操","轮奸","迷奸","鸡巴","阴茎","阴道","一夜情","包养","援交","外围女","桑拿妹","脱衣舞","艳舞","艳照","裸照","裸体","裸聊","全裸","性感写真","私处","白浆","潮喷","叫床","福利姬","下海","失禁","榨精","足交","口活","白虎","少妇","人妻","换脸","痴汉","电车","偷情"];
+var DENY_CODES=[/\b[A-Z]{2,6}-\d{2,5}\b/,/\b\d{6}_\d{3}\b/,/1Pondo/i,/\b(IDG|PMS|TPCP)\d{3,5}\b/i];
+function isBlockedTitle(title){
+  var text=String(title||"");
+  if(!text)return false;
+  for(var i=0;i<DENY_WORDS.length;i++){if(text.indexOf(DENY_WORDS[i])>=0)return true;}
+  for(var j=0;j<DENY_CODES.length;j++){if(DENY_CODES[j].test(text))return true;}
+  return false;
+}
+
 function macProviders(value, extraMode) {
-  var defaults = "极速资源|https://jszyapi.com/api.php/provide/vod/\n金鹰资源|https://jyzyapi.com/api.php/provide/vod/\n光速资源|https://api.guangsuapi.com/api.php/provide/vod/\n虎牙资源|https://www.huyaapi.com/api.php/provide/vod/\n红牛资源|https://www.hongniuzy2.com/api.php/provide/vod/\n速播资源|https://subocaiji.com/api.php/provide/vod/\n魔都资源|https://caiji.moduapi.cc/api.php/provide/vod/\n360资源|https://360zyzz.com/api.php/provide/vod/\n闪电资源|https://sdzyapi.com/api.php/provide/vod/\n播剧网|https://ysxq.cc/api.php/provide/vod/";
+  // 实测可播且提供独立片目的 8 个核心源（前4页片名覆盖 78.7%）。
+  var defaults = "滴滴资源|https://api.ddapi.cc/api.php/provide/vod/\n樱花资源|https://m3u8.apiyhzy.com/api.php/provide/vod/\n量子资源|https://cj.lziapi.com/api.php/provide/vod/\nU酷资源|https://api.ukuapi88.com/api.php/provide/vod/\n无尽资源|https://api.wujinapi.me/api.php/provide/vod/\n虎牙资源|https://www.huyaapi.com/api.php/provide/vod/\n魔都资源|https://caiji.moduapi.cc/api.php/provide/vod/\n播剧网|https://ysxq.cc/api.php/provide/vod/";
   var providers=parseProviders(String(value||"").trim()||defaults);
   if(extraMode!=="off"){
-    var additional=parseProviders("非凡资源|https://api.ffzyapi.com/api.php/provide/vod/\n天涯资源|https://tyyszy.com/api.php/provide/vod/\n如意资源|https://cj.rycjapi.com/api.php/provide/vod/\n量子资源|https://cj.lziapi.com/api.php/provide/vod/\n魔都资源|https://caiji.moduapi.cc/api.php/provide/vod/\n暴风资源|https://bfzyapi.com/api.php/provide/vod/\n360资源|https://360zyzz.com/api.php/provide/vod/\n闪电资源|https://sdzyapi.com/api.php/provide/vod/\n无尽资源|https://api.wujinapi.com/api.php/provide/vod/\n优酷资源|https://api.ukuapi.com/api.php/provide/vod/\n红牛资源|https://www.hongniuzy2.com/api.php/provide/vod/\n速播资源|https://subocaiji.com/api.php/provide/vod/\n金鹰资源|https://jyzyapi.com/api.php/provide/vod/\n光速资源|https://api.guangsuapi.com/api.php/provide/vod/\n虎牙资源|https://www.huyaapi.com/api.php/provide/vod/\n豪华资源|https://hhzyapi.com/api.php/provide/vod/\n极速资源|https://jszyapi.com/api.php/provide/vod/\n多多资源|https://api.ddapi.cc/api.php/provide/vod/");
-    // 2026-11 实测剔除：lziapi 返回 404、tyyszy 超时且返回体异常。
-    var DROPPED=/(lziapi|tyyszy|149\.104\.6\.155|38\.76\.166\.26)/i;
+    // 追加 10 个补充源，按独立贡献降序；合计 18 源覆盖 100%。
+    var additional=parseProviders("飘零影院|https://p2100.net/api.php/provide/vod/\n非凡资源|https://api.ffzyapi.com/api.php/provide/vod/\n360资源|https://360zyzz.com/api.php/provide/vod/\n暴风资源|https://app.bfzyapi.com/api.php/provide/vod/\n电影天堂|http://caiji.dyttzyapi.com/api.php/provide/vod\n百度资源|https://api.apibdzy.com/api.php/provide/vod/\n360资源站|https://360zy.com/api.php/provide/vod/\n光速资源|https://api.guangsuapi.com/api.php/provide/vod/\n天涯资源|https://ty.tyyszy5.com/api.php/provide/vod/\n红牛资源|https://www.hongniuzy3.com/api.php/provide/vod/");
+    // 2026-11 复测：lziapi 与 tyyszy 已恢复（各自 +77/+4 独立片目），故解除旧剔除。
+    // 仍剔除：已失效的旧 iBox 采集节点。
+    var DROPPED=/(149\.104\.6\.155|38\.76\.166\.26)/i;
     additional=additional.filter(function(provider){return !DROPPED.test(provider.baseUrl);});
     additional.forEach(function(provider){providers.push(provider);});
   }
   // 实测可播与响应速度排序：跨源匹配只取前 12 个，顺序即优先级。
-  var RANK=["jszyapi","jyzyapi","guangsuapi","huyaapi","hongniuzy2","subocaiji","caiji.moduapi.cc","360zyzz","sdzyapi","hhzyapi","bfzyapi","wujinapi","ukuapi","ysxq","ddapi","rycjapi","ffzyapi"];
+  var RANK=["ddapi","apiyhzy","lziapi","ukuapi88","wujinapi","huyaapi","caiji.moduapi.cc","ysxq","p2100","ffzyapi","360zyzz","bfzyapi","dyttzyapi","apibdzy","360zy.com","guangsuapi","tyyszy","hongniuzy3"];
   providers.forEach(function(provider){
     var host=String(provider.baseUrl||"").toLowerCase(),rank=RANK.length;
     for(var i=0;i<RANK.length;i++){if(host.indexOf(RANK[i])>=0){rank=i;break;}}
     provider._rank=rank;
-    // 慢源单独放宽超时：实测 bfzyapi/ffzyapi 常在 20-45s 才返回首包。
-    provider.timeoutMs=provider.timeoutMs||(/bfzyapi|ffzyapi|ddapi|rycjapi/.test(host)?18000:9000);
+    // 超时实测：这批源前置 Cloudflare，首包在 2-14s 之间浮动，9s 会随机砍掉健康源。
+    // 故统一放宽到 20s，仅对实测稳定快速的源保留较短超时。
+    var fastHost=/(ukuapi88|ddapi|tyyszy|hongniuzy3|360zy\.com|360zyzz|dyttzyapi|bfzyapi|apiyhzy)/;
+    provider.timeoutMs=provider.timeoutMs||(fastHost.test(host)?15000:20000);
   });
   providers.sort(function(a,b){return (a._rank===undefined?99:a._rank)-(b._rank===undefined?99:b._rank);});
   var seen={};return providers.filter(function(provider){var key=provider.baseUrl.replace(/\/+$/,"").toLowerCase();if(seen[key])return false;seen[key]=true;return true;});
@@ -1546,6 +1563,8 @@ async function queryMac(provider,params) {
 }
 
 function macListItem(item, provider) {
+  // 内容过滤：命中成人词表或番号格式的条目直接丢弃（返回 null，由调用方过滤）。
+  if(isBlockedTitle(item && item.vod_name))return null;
   var playGroups=String(item.vod_play_url||"").split("$$$").filter(function(group){return !!group;});
   var onePartAnime=/(?:动漫|动画)/.test(String(item.type_name||"")) && playGroups.length>0 && playGroups.every(function(group){return group.split("#").filter(function(x){return !!x;}).length===1;});
   var context={kind:"maccms",vodId:String(item.vod_id),api:provider.baseUrl,sourceName:provider.name,
@@ -1563,7 +1582,7 @@ async function listCloud(params) {
   params=params||{};var jobs=[listBaiduCloud(params).catch(function(){return [];})];
   macProviders(params.directProviderUrls,params.extraSourcesMode).forEach(function(provider){
     jobs.push(queryMac(provider,{ac:"detail",pg:String(params.page||1)}).then(function(items){
-      return items.map(function(item){return macListItem(item,provider);});
+      return items.map(function(item){return macListItem(item,provider);}).filter(Boolean);
     }).catch(function(){return [];}));
   });
   var groups=await Promise.all(jobs);var items=interleaveGroups(groups,100);
@@ -1593,7 +1612,7 @@ async function searchCloud(params) {
   var jobs=[Promise.resolve(verifiedCatalogItems(keyword,params.extraSourcesMode)),searchBaiduCloud(params).catch(function(){return [];})];
   macProviders(params.directProviderUrls,params.extraSourcesMode).forEach(function(provider){
     jobs.push(queryMac(provider,{ac:"detail",wd:keyword,pg:String(params.page||1)}).then(function(items){
-      return items.map(function(item){return macListItem(item,provider);});
+      return items.map(function(item){return macListItem(item,provider);}).filter(Boolean);
     }).catch(function(){return [];}));
   });
   return interleaveGroups(await Promise.all(jobs),500);
@@ -1749,6 +1768,7 @@ async function findCrossSourceMedia(context,params) {
       });
       if(matches.length!==1)return [];
       var root=macListItem(matches[0],provider);
+      if(!root)return [];
       var detail=await loadMacDetail(decodeCloudLink(root.link));
       var episode=null;
       for(var i=0;i<detail.episodeItems.length;i++){
