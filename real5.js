@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.5",
+  version: "1.6.6",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -1482,6 +1482,13 @@ async function loadBrowse(params) {
   }));
 
   var items = interleaveGroups(groups, limit);
+  // 夸克 4K 资源前置：让分类浏览里能直接看到高画质条目（按分类映射到资源站类型）
+  try {
+    var quarkItems = await browseQuark4k(spec, page, limit, params);
+    if (quarkItems.length) items = quarkItems.concat(items).slice(0, limit);
+  } catch (error) {
+    console.log("[iBox165] browse quark4k skipped " + safeError(error));
+  }
   if (!items.length) throw new Error(spec.title + " 暂无数据；可换个分类、翻页，或稍后再试");
   console.log("[iBox160] browse result " + JSON.stringify({ category: spec.title, count: items.length }));
   return items;
@@ -1933,6 +1940,29 @@ async function loadQuark4kResources(context, params) {
       _quarkOrder: index,
     };
   });
+}
+
+// 分类浏览里的夸克 4K：把 iBox 分类映射到资源站的标题类型词
+async function browseQuark4k(spec, page, limit, params) {
+  // 未配置夸克 Cookie 时不发起任何请求（保持离线/未配置场景零网络开销）
+  if (!quarkCookieOf(params)) return [];
+  var keywordMap = {
+    guoman: "国漫", guoju: "国产剧", movie: "电影", hanju: "韩剧", meiju: "美剧",
+    riman: "日漫", gangju: "港剧", taiju: "台剧", riju: "日剧", taiju2: "泰剧",
+    zongyi: "综艺", duanju: "短剧",
+  };
+  var query = keywordMap[spec.key] || spec.title;
+  var entries = await fetchQuark4k(query, Math.max(0, (Number(page || 1) - 1) * 20));
+  // 只保留与当前分类一致的条目，避免串类
+  var wanted = spec.title;
+  var filtered = entries.filter(function (e) {
+    if (wanted === "电影") return e.category === "电影";
+    if (wanted === "综艺") return e.category === "综艺";
+    if (wanted === "国漫" || wanted === "日漫") return e.category === "动漫";
+    return e.category === "剧集";
+  });
+  filtered.sort(function (a, b) { return (b.is4k ? 1 : 0) - (a.is4k ? 1 : 0); });
+  return filtered.map(quark4kListItem).filter(Boolean).slice(0, Math.max(6, Math.floor(limit / 3)));
 }
 
 function macProviders(value, extraMode) {
@@ -2835,7 +2865,17 @@ async function loadPrivateLibrary(params) {
   params = params || {};
   rememberEmbySetting(params.embyServers);
   var servers = parseEmbyServers(params.embyServers);
-  if (!servers.length) return [];
+  var privatePage = Number(params.page || 1) > 0 ? Number(params.page || 1) : 1;
+  var privateCount = Number(params.count || 30) > 0 ? Number(params.count || 30) : 30;
+  // 未配置 Emby 时仍要返回夸克网盘内容，不能直接返回空数组
+  if (!servers.length) {
+    try {
+      return await listQuarkCloud(params, privateCount);
+    } catch (error) {
+      console.log("[iBox165] private quark only skipped " + safeError(error));
+      return [];
+    }
+  }
   var page = Number(params.page || 1) > 0 ? Number(params.page || 1) : 1;
   var count = Number(params.count || 30) > 0 ? Number(params.count || 30) : 30;
   var startIndex = (page - 1) * count;
@@ -2874,6 +2914,13 @@ async function loadPrivateLibrary(params) {
     } catch (error) {
       console.error("[iBox152] private library failed " + JSON.stringify({ server: server.name, error: safeError(error) }));
     }
+  }
+  // 夸克网盘：即便未配置 Emby，也应能看到网盘里已有的影片（含 4K 原画）
+  try {
+    var quarkVideos = await listQuarkCloud(params, count);
+    if (quarkVideos.length) items = quarkVideos.concat(items).slice(0, count);
+  } catch (error) {
+    console.log("[iBox165] private quark skipped " + safeError(error));
   }
   return items;
 }
