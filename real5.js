@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.8",
+  version: "1.6.9",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -21,7 +21,7 @@ WidgetMetadata = {
     { id: "loadResource", title: "iBox 播放资源", functionName: "loadResource", type: "stream", cacheDuration: 0, params: [] },
     {
       id: "loadList",
-      title: "私人片库",
+      title: "全部资源",
       functionName: "loadPrivateLibrary",
       params: [
         { name: "page", title: "页码", type: "page" },
@@ -1507,7 +1507,7 @@ async function loadBrowse(params) {
 
 // 内容过滤：用于挡掉采集站里混入的成人条目。词表只收无歧义多字词，
 // 单字（干/操/啪/骚/裸/妓）不入表——实测会误杀正经片名。
-var DENY_WORDS=["约炮","探花","楼凤","嫖娼","做爱","性爱","性交","性侵","性虐","情色","色情","三级片","伦理片","肉棒","肉穴","肉便器","小穴","嫩穴","蜜穴","美穴","淫穴","淫荡","淫水","淫声","淫妻","淫娃","淫乱","骚穴","骚逼","骚女","骚货","发骚","风骚","巨乳","爆乳","美乳","奶子","鲍鱼","肥鲍","炮友","车震","野战","颜射","口爆","内射","中出","自慰","手淫","口交","肛交","群交","乱伦","兽交","女优","无码","有码","偷拍","自拍流出","调教","母狗","母畜","精液","射精","撸管","春药","媚药","荡妇","痴女","露点","走光","波霸","舔屌","舔穴","舔阴","骑乘","抽插","狂操","狂干","爆操","轮奸","迷奸","鸡巴","阴茎","阴道","一夜情","包养","援交","外围女","桑拿妹","脱衣舞","艳舞","艳照","裸照","裸体","裸聊","全裸","性感写真","私处","白浆","潮喷","叫床","福利姬","下海","失禁","榨精","足交","口活","白虎","少妇","人妻","换脸","痴汉","电车","偷情"];
+var DENY_WORDS=["约炮","探花","楼凤","嫖娼","做爱","性爱","性交","性侵","性虐","情色","色情","三级片","伦理片","肉棒","肉穴","肉便器","小穴","嫩穴","蜜穴","美穴","淫穴","淫荡","淫水","淫声","淫妻","淫娃","淫乱","骚穴","骚逼","骚女","骚货","发骚","风骚","巨乳","爆乳","美乳","奶子","鲍鱼","肥鲍","炮友","车震","野战","颜射","口爆","内射","中出","自慰","手淫","口交","肛交","群交","乱伦","兽交","女优","无码","有码","偷拍","自拍流出","调教","母狗","母畜","精液","射精","撸管","春药","媚药","荡妇","痴女","露点","走光","波霸","舔屌","舔穴","舔阴","骑乘","抽插","狂操","狂干","爆操","轮奸","迷奸","鸡巴","阴茎","阴道","一夜情","包养","援交","外围女","桑拿妹","脱衣舞","艳舞","艳照","裸照","裸体","裸聊","全裸","性感写真","私处","白浆","潮喷","叫床","福利姬","下海","失禁","榨精","足交","口活","白虎","少妇","人妻","换脸","痴汉","电车","偷情","极品","清纯","校花","大尺度","超嫩","海军COS","网红","大秀","无套","宝宝","白虎","嫩模","外围","丝袜","黑丝","约啪","约啪网","资源群","福利群","私拍","模特私拍","舞蹈生","学生妹","空姐","女主播","颜值主播","探花视频","偷拍视频","国产自拍","自拍视频","大秀视频"];
 var DENY_CODES=[/\b[A-Z]{2,6}-\d{2,5}\b/,/\b\d{6}_\d{3}\b/,/1Pondo/i,/\b(IDG|PMS|TPCP)\d{3,5}\b/i];
 function isBlockedTitle(title){
   var text=String(title||"");
@@ -2949,14 +2949,21 @@ async function loadPrivateLibrary(params) {
   var servers = parseEmbyServers(params.embyServers);
   var privatePage = Number(params.page || 1) > 0 ? Number(params.page || 1) : 1;
   var privateCount = Number(params.count || 30) > 0 ? Number(params.count || 30) : 30;
-  // 未配置 Emby 时仍要返回夸克网盘内容，不能直接返回空数组
+
+  // 「全部资源」：把网盘、4K 资源站、采集源合并到一处，不必再分别进不同入口。
   if (!servers.length) {
-    try {
-      return await listQuarkCloud(params, privateCount);
-    } catch (error) {
-      console.log("[iBox165] private quark only skipped " + safeError(error));
-      return [];
-    }
+    var jobs = [];
+    jobs.push(listQuarkCloud(params, privateCount));
+    jobs.push(searchQuark4kSources("", privatePage).catch(function () { return []; }));
+    macProviders(params.directProviderUrls, params.extraSourcesMode).forEach(function (provider) {
+      jobs.push(queryMac(provider, { ac: "detail", pg: String(privatePage) }).then(function (items) {
+        return items.map(function (item) { return macListItem(item, provider); }).filter(Boolean);
+      }).catch(function () { return []; }));
+    });
+    var groups = await Promise.all(jobs);
+    var mergedItems = interleaveGroups(groups, Math.max(privateCount, 100));
+    if (!mergedItems.length) throw new Error("全部资源源暂时未返回数据，请检查网络后重试");
+    return mergedItems;
   }
   var page = Number(params.page || 1) > 0 ? Number(params.page || 1) : 1;
   var count = Number(params.count || 30) > 0 ? Number(params.count || 30) : 30;
