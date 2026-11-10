@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.3",
+  version: "1.6.4",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -11,6 +11,7 @@ WidgetMetadata = {
     { name: "extraSourcesMode", title: "补充播放源", type: "enumeration", value: "on", description: "开启后追加 10 个直连补充源（合计 18 个，覆盖国漫/国产剧/电影/韩剧/美剧/日漫/综艺）。均为实测可播源；片库已内置内容过滤，屏蔽采集站混入的成人条目。", enumOptions: [ { title: "开启（更多线路）", value: "on" }, { title: "关闭（只用核心 8 源）", value: "off" } ] },
     { name: "playbackPreference", title: "播放偏好", type: "enumeration", value: "quality", description: "默认优先源文件标注的 4K/HDR，不转码、不删除其他画质", enumOptions: [ { title: "4K / 原画优先", value: "quality" }, { title: "流畅优先（小文件）", value: "smooth" } ] },
     { name: "directProviderUrls", title: "直连采集源", type: "input", description: "每行一个：名称|MacCMS API 地址；留空则用内置 8 个核心源（另有 10 个补充源随「补充播放源」开关加入）。自定义源同样受内容过滤约束", value: "" },
+    { name: "quarkCookie", title: "夸克网盘 Cookie", type: "input", description: "可选。填入夸克网盘(pan.quark.cn)登录后的 Cookie 整串，即可直接播放网盘内的原画/4K 文件。留空则不启用夸克网盘" },
     { name: "baiduCookie", title: "百度 Cookie / Token", type: "input", description: "包含 BDUSS 和 STOKEN 的百度网盘 Cookie" },
     { name: "parseEndpoints", title: "官方平台解析接口", type: "input", description: "可选。每行一个：名称|https://解析接口/?url=  ；留空则不做官方平台解析", value: "" },
     { name: "providerUrls", title: "云盘资源站", type: "input", description: "每行一个：名称|MacCMS站点地址", value: "小虎|http://103.40.14.172:12512" },
@@ -445,6 +446,7 @@ async function loadIBoxContextResources(params) {
   params = params || {};
   var context = decodeCloudLink(params.link);
   if (context && (context.kind === "maccms" || context.kind === "maccmsEpisode")) return await loadMacResources(context, params);
+  if (context && context.kind === "quarkFile") return await loadQuarkResources(context, params);
   var files = context && context.files;
   if (!files || !files.length) return [];
 
@@ -1496,6 +1498,194 @@ function isBlockedTitle(title){
   return false;
 }
 
+// ===== 夸克网盘直连（原画 / 4K） =====
+// 关键：走 file/v2/play 播放接口，而不是 file/download 下载接口。
+// 后者对大文件返回 23018，前者按账号会员权限放行，并可拿到 trans_status=raw 的原画直链。
+var QUARK_API = "https://drive-pc.quark.cn/1/clouddrive";
+var QUARK_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0";
+var QUARK_VIDEO_RE = /\.(mp4|mkv|mov|m4v|avi|ts|flv|wmv|webm|rmvb)$/i;
+// 清晰度优先级：raw(原画) > 4k > 2k > super > high > normal > low
+var QUARK_RES_RANK = { raw: 100, "4k": 90, "2k": 80, super: 70, high: 60, normal: 50, low: 40 };
+
+function quarkCookieOf(params) {
+  var value = String((params && params.quarkCookie) || "").trim();
+  if (value) {
+    try { Widget.storage.set("quark-cookie", value); } catch (e) {}
+    return value;
+  }
+  try { return String(Widget.storage.get("quark-cookie") || "").trim(); } catch (e) { return ""; }
+}
+
+function quarkHeaders(cookie) {
+  return {
+    "User-Agent": QUARK_UA,
+    Accept: "application/json, text/plain, */*",
+    "Content-Type": "application/json",
+    Referer: "https://pan.quark.cn/",
+    Origin: "https://pan.quark.cn",
+    Cookie: cookie,
+  };
+}
+
+function quarkQuery(extra) {
+  return "pr=ucpro&fr=pc&uc_param_str=&__dt=" + Math.floor(Math.random() * 9000 + 100) +
+    "&__t=" + Date.now() + (extra || "");
+}
+
+async function quarkGet(cookie, path) {
+  var url = QUARK_API + path + (path.indexOf("?") >= 0 ? "&" : "?") + quarkQuery("");
+  var response = await Widget.http.get(url, { headers: quarkHeaders(cookie), timeout: 20000 });
+  return asJson(response.data);
+}
+
+async function quarkPost(cookie, path, body) {
+  var url = QUARK_API + path + (path.indexOf("?") >= 0 ? "&" : "?") + quarkQuery("");
+  var response = await Widget.http.post(url, JSON.stringify(body), { headers: quarkHeaders(cookie), timeout: 20000 });
+  return asJson(response.data);
+}
+
+// 列出网盘目录下的视频文件（支持递归，默认两层，避免深层目录拖慢列表）
+async function listQuarkVideos(cookie, pdirFid, depth, budget) {
+  var level = Number(depth || 0);
+  var left = budget || { dirs: 12 };
+  var path = "/file/sort?pdir_fid=" + encodeURIComponent(pdirFid || "0") +
+    "&_page=1&_size=200&_fetch_total=1&_sort=file_type:asc,updated_at:desc";
+  var data = await quarkGet(cookie, path);
+  if (!data || Number(data.code) !== 0) throw new Error("夸克目录读取失败 " + String(data && data.message || ""));
+  var list = (data.data && data.data.list) || [];
+  var videos = list.filter(function (file) { return !file.dir && QUARK_VIDEO_RE.test(String(file.file_name || "")); });
+  // 递归子目录：受层数与目录总数双重约束，防止超大网盘卡死
+  if (level < 2) {
+    var dirs = list.filter(function (file) { return !!file.dir; });
+    for (var i = 0; i < dirs.length && left.dirs > 0; i++) {
+      left.dirs -= 1;
+      try {
+        var sub = await listQuarkVideos(cookie, dirs[i].fid, level + 1, left);
+        videos = videos.concat(sub);
+      } catch (error) { /* 单个子目录失败不影响整体 */ }
+    }
+  }
+  return videos;
+}
+
+// 解析某个文件的清晰度档位，返回按画质降序的候选（含直链）
+async function resolveQuarkStreams(cookie, fid) {
+  var data = await quarkPost(cookie, "/file/v2/play", {
+    fid: fid,
+    resolutions: "normal,low,high,super,2k,4k",
+    supports: "fmp4,m3u8",
+  });
+  if (!data || Number(data.code) !== 0) throw new Error("夸克播放解析失败 " + String(data && data.message || ""));
+  var list = (data.data && data.data.video_list) || [];
+  var out = [];
+  for (var i = 0; i < list.length; i++) {
+    var item = list[i] || {};
+    var info = item.video_info || {};
+    var streamUrl = String(info.url || "").trim();
+    if (!streamUrl) continue;
+    var isRaw = String(item.trans_status || "") === "raw";
+    var width = Number(info.width || 0), height = Number(info.height || 0);
+    out.push({
+      url: streamUrl,
+      resolution: String(item.resolution || ""),
+      raw: isRaw,
+      width: width,
+      height: height,
+      codec: String(info.codec || ""),
+      bitrate: Number(info.bitrate || 0),
+      size: Number(info.size || 0),
+      format: String(info.file_format || info.format || ""),
+      rank: (QUARK_RES_RANK[String(item.resolution || "").toLowerCase()] || 0) + (isRaw ? 5 : 0),
+    });
+  }
+  out.sort(function (a, b) { return b.rank - a.rank || b.height - a.height; });
+  return out;
+}
+
+// 把夸克文件转成 iBox 列表条目（带真实分辨率标注）
+function quarkListItem(file, cookie) {
+  if (isBlockedTitle(file && file.file_name)) return null;
+  var title = String(file.file_name || "").replace(QUARK_VIDEO_RE, "");
+  var context = {
+    kind: "quarkFile",
+    fid: String(file.fid || ""),
+    title: title,
+    size: Number(file.size || 0),
+    mediaType: /s\d{1,2}e\d{1,3}|第\s*\d+\s*[集话話]/i.test(title) ? "tv" : "movie",
+    id: "quark:" + String(file.fid || ""),
+  };
+  return {
+    id: context.id,
+    type: "url",
+    title: "夸克网盘 | " + title,
+    description: "原画优先" + (file.size ? " · " + formatFileSize(Number(file.size)) : ""),
+    mediaType: context.mediaType,
+    link: encodeCloudLink(context),
+  };
+}
+
+// 列表页：把网盘视频合入
+async function listQuarkCloud(params, limit) {
+  var cookie = quarkCookieOf(params);
+  if (!cookie) return [];
+  try {
+    var files = await listQuarkVideos(cookie, "0", 0, { dirs: 12 });
+    return files.map(function (file) { return quarkListItem(file, cookie); })
+      .filter(Boolean)
+      .slice(0, limit || 60);
+  } catch (error) {
+    console.error("[iBox160] quark list failed " + safeError(error));
+    return [];
+  }
+}
+
+// 搜索页：按片名检索网盘视频
+async function searchQuarkCloud(params, keyword) {
+  var cookie = quarkCookieOf(params);
+  var query = String(keyword || "").trim();
+  if (!cookie || !query) return [];
+  try {
+    var data = await quarkGet(cookie, "/file/search?keyword=" + encodeURIComponent(query) +
+      "&_page=1&_size=100");
+    if (!data || Number(data.code) !== 0) return [];
+    var list = (data.data && data.data.list) || [];
+    return list.filter(function (file) {
+      return !file.dir && QUARK_VIDEO_RE.test(String(file.file_name || ""));
+    }).map(function (file) { return quarkListItem(file, cookie); }).filter(Boolean).slice(0, 40);
+  } catch (error) {
+    console.error("[iBox160] quark search failed " + safeError(error));
+    return [];
+  }
+}
+
+// 播放页：解析出可播资源
+async function loadQuarkResources(context, params) {
+  var cookie = quarkCookieOf(params);
+  if (!cookie) throw new Error("夸克网盘未配置 Cookie");
+  var streams = await resolveQuarkStreams(cookie, context.fid);
+  if (!streams.length) throw new Error("夸克未返回可播流");
+  return streams.map(function (stream, index) {
+    var label = stream.raw ? "原画" : (stream.resolution || "转码");
+    var detail = [];
+    if (stream.width && stream.height) detail.push(stream.width + "x" + stream.height);
+    if (stream.codec) detail.push(stream.codec);
+    if (stream.bitrate) detail.push(Math.round(stream.bitrate / 1000) + "Mbps");
+    return {
+      name: "夸克网盘 · " + label + (detail.length ? " · " + detail.join(" ") : ""),
+      description: (stream.raw ? "原画直出" : "云端转码") + (detail.length ? " · " + detail.join(" ") : ""),
+      url: stream.url,
+      customHeaders: {
+        "User-Agent": QUARK_UA,
+        Referer: "https://pan.quark.cn/",
+        Cookie: cookie,
+      },
+      playerType: /\.m3u8/i.test(stream.url) ? "system" : "app",
+      _quarkRank: stream.rank,
+      _quarkOrder: index,
+    };
+  });
+}
+
 function macProviders(value, extraMode) {
   // 实测可播且提供独立片目的 8 个核心源（前4页片名覆盖 78.7%）。
   var defaults = "滴滴资源|https://api.ddapi.cc/api.php/provide/vod/\n樱花资源|https://m3u8.apiyhzy.com/api.php/provide/vod/\n量子资源|https://cj.lziapi.com/api.php/provide/vod/\nU酷资源|https://api.ukuapi88.com/api.php/provide/vod/\n无尽资源|https://api.wujinapi.me/api.php/provide/vod/\n虎牙资源|https://www.huyaapi.com/api.php/provide/vod/\n魔都资源|https://caiji.moduapi.cc/api.php/provide/vod/\n播剧网|https://ysxq.cc/api.php/provide/vod/";
@@ -1579,7 +1769,7 @@ function macMediaType(item) {
 }
 
 async function listCloud(params) {
-  params=params||{};var jobs=[listBaiduCloud(params).catch(function(){return [];})];
+  params=params||{};var jobs=[listBaiduCloud(params).catch(function(){return [];}),listQuarkCloud(params,60)];
   macProviders(params.directProviderUrls,params.extraSourcesMode).forEach(function(provider){
     jobs.push(queryMac(provider,{ac:"detail",pg:String(params.page||1)}).then(function(items){
       return items.map(function(item){return macListItem(item,provider);}).filter(Boolean);
@@ -1609,7 +1799,7 @@ function verifiedCatalogItems(keyword,mode){
 async function searchCloud(params) {
   params=params||{};var keyword=String(params.keyword||params.query||"").trim();
   if(!keyword)return await listCloud(params);
-  var jobs=[Promise.resolve(verifiedCatalogItems(keyword,params.extraSourcesMode)),searchBaiduCloud(params).catch(function(){return [];})];
+  var jobs=[Promise.resolve(verifiedCatalogItems(keyword,params.extraSourcesMode)),searchBaiduCloud(params).catch(function(){return [];}),searchQuarkCloud(params,keyword).catch(function(){return [];})];
   macProviders(params.directProviderUrls,params.extraSourcesMode).forEach(function(provider){
     jobs.push(queryMac(provider,{ac:"detail",wd:keyword,pg:String(params.page||1)}).then(function(items){
       return items.map(function(item){return macListItem(item,provider);}).filter(Boolean);
