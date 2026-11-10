@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.9",
+  version: "1.7.0",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -1648,7 +1648,9 @@ async function listQuarkCloud(params, limit) {
   var cookie = quarkCookieOf(params);
   if (!cookie) return [];
   try {
-    var files = await listQuarkVideos(cookie, "0", 0, { dirs: 12 });
+    // 只读「夸克影视」分类目录；不存在时退回全盘（保持旧行为，不至于空列表）
+    var libraryRoot = await quarkLibraryRoot(cookie);
+    var files = await listQuarkVideos(cookie, libraryRoot || "0", 0, { dirs: 12 });
     return files.map(function (file) { return quarkListItem(file, cookie); })
       .filter(Boolean)
       .slice(0, limit || 60);
@@ -1845,6 +1847,18 @@ async function ensureQuarkCategoryDir(cookie, category) {
   var allowed = { "电影": 1, "剧集": 1, "动漫": 1, "综艺": 1, "纪录片": 1 };
   var target = allowed[category] ? category : "其他";
   return await ensureQuarkDir(cookie, rootFid, target);
+}
+
+// 「全部资源」只读「夸克影视」分类树：避免把网盘里的教程、资料等非影视内容混入列表。
+// 若该目录不存在则返回空，由调用方决定是否回退到全盘。
+var QUARK_LIBRARY_ROOT_NAME = "夸克影视";
+async function quarkLibraryRoot(cookie) {
+  var listing = await quarkGet(cookie, "/file/sort?pdir_fid=0&_page=1&_size=200&_fetch_total=1&_sort=file_type:asc,updated_at:desc");
+  var list = (listing && listing.data && listing.data.list) || [];
+  for (var i = 0; i < list.length; i += 1) {
+    if (list[i].dir && String(list[i].file_name) === QUARK_LIBRARY_ROOT_NAME) return list[i].fid;
+  }
+  return "";
 }
 
 // 把分享转存到指定目录。返回 { taskId, pwdId }
