@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.7.0",
+  version: "1.7.1",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -1803,14 +1803,32 @@ function quark4kListItem(entry) {
 }
 
 // 搜索 quark4k（供列表/搜索页调用）
+// 搜索 / 全部资源入口的 4K 资源。有词时精确搜；无词时翻多页汇总最新资源。
 async function searchQuark4kSources(keyword, page) {
   var query = String(keyword || "").trim();
   try {
-    var offset = Math.max(0, (Number(page || 1) - 1) * 20);
-    var entries = await fetchQuark4k(query, query ? 0 : offset);
-    // 4K 优先，其余按原顺序
-    entries.sort(function (a, b) { return (b.is4k ? 1 : 0) - (a.is4k ? 1 : 0); });
-    return entries.map(quark4kListItem).filter(Boolean).slice(0, 40);
+    var pageNo = Math.max(1, Number(page || 1));
+    var entries = [];
+    if (query) {
+      entries = await fetchQuark4k(query, 0);
+    } else {
+      // 无关键词：翻 4 页凑出更多条目，供「全部资源」首页展示
+      var offset = (pageNo - 1) * 80;
+      for (var p = 0; p < 4; p += 1) {
+        var batch = await fetchQuark4k("", offset + p * 20);
+        if (!batch.length) break;
+        entries = entries.concat(batch);
+      }
+    }
+    // 按 pwdId 去重
+    var seen = {}, uniq = [];
+    for (var i = 0; i < entries.length; i += 1) {
+      if (seen[entries[i].pwdId]) continue;
+      seen[entries[i].pwdId] = true;
+      uniq.push(entries[i]);
+    }
+    uniq.sort(function (a, b) { return (b.is4k ? 1 : 0) - (a.is4k ? 1 : 0); });
+    return uniq.map(quark4kListItem).filter(Boolean).slice(0, query ? 40 : 80);
   } catch (error) {
     console.error("[iBox165] quark4k search failed " + safeError(error));
     return [];
@@ -1970,26 +1988,43 @@ async function loadQuark4kResources(context, params) {
 }
 
 // 分类浏览里的夸克 4K：把 iBox 分类映射到资源站的标题类型词
+// 分类浏览里的夸克 4K：按分类翻多页汇总，保证每类都能看到足量条目。
+// 资源站每页 20 条且含其他分类，因此需要翻页过滤后再截取。
 async function browseQuark4k(spec, page, limit, params) {
-  // 未配置夸克 Cookie 时不发起任何请求（保持离线/未配置场景零网络开销）
   if (!quarkCookieOf(params)) return [];
-  var keywordMap = {
-    guoman: "国漫", guoju: "国产剧", movie: "电影", hanju: "韩剧", meiju: "美剧",
-    riman: "日漫", gangju: "港剧", taiju: "台剧", riju: "日剧", taiju2: "泰剧",
-    zongyi: "综艺", duanju: "短剧",
-  };
-  var query = keywordMap[spec.key] || spec.title;
-  var entries = await fetchQuark4k(query, Math.max(0, (Number(page || 1) - 1) * 20));
-  // 只保留与当前分类一致的条目，避免串类
   var wanted = spec.title;
-  var filtered = entries.filter(function (e) {
+  var want = function (e) {
     if (wanted === "电影") return e.category === "电影";
     if (wanted === "综艺") return e.category === "综艺";
-    if (wanted === "国漫" || wanted === "日漫") return e.category === "动漫";
+    if (wanted === "纪录片") return e.category === "纪录片";
+    if (wanted === "国漫" || wanted === "日漫" || wanted === "动漫") return e.category === "动漫";
     return e.category === "剧集";
-  });
-  filtered.sort(function (a, b) { return (b.is4k ? 1 : 0) - (a.is4k ? 1 : 0); });
-  return filtered.map(quark4kListItem).filter(Boolean).slice(0, Math.max(6, Math.floor(limit / 3)));
+  };
+  // 目标：每类返回约 30 条。资源站单页 20 条、同类占比约 40%，故翻 5 页。
+  var pageNo = Math.max(1, Number(page || 1));
+  var perPage = 20;
+  var pagesBack = 5;
+  var startOffset = (pageNo - 1) * perPage * pagesBack;
+  var collected = [];
+  var seen = {};
+  for (var p = 0; p < pagesBack; p += 1) {
+    var batch = [];
+    try {
+      batch = await fetchQuark4k("", startOffset + p * perPage);
+    } catch (error) { batch = []; }
+    if (!batch.length) break;
+    for (var i = 0; i < batch.length; i += 1) {
+      var entry = batch[i];
+      if (!want(entry)) continue;
+      if (seen[entry.pwdId]) continue;
+      seen[entry.pwdId] = true;
+      collected.push(entry);
+    }
+    if (collected.length >= 30) break;
+  }
+  collected.sort(function (a, b) { return (b.is4k ? 1 : 0) - (a.is4k ? 1 : 0); });
+  var cap = Math.max(20, Math.min(60, Number(limit || 30)));
+  return collected.map(quark4kListItem).filter(Boolean).slice(0, cap);
 }
 
 function macProviders(value, extraMode) {
@@ -2964,20 +2999,32 @@ async function loadPrivateLibrary(params) {
   var privatePage = Number(params.page || 1) > 0 ? Number(params.page || 1) : 1;
   var privateCount = Number(params.count || 30) > 0 ? Number(params.count || 30) : 30;
 
-  // 「全部资源」：把网盘、4K 资源站、采集源合并到一处，不必再分别进不同入口。
+  // 「全部资源」：网盘 → 4K 资源站 → 采集源，按此优先级前置，保证高画质条目先被看到。
   if (!servers.length) {
-    var jobs = [];
-    jobs.push(listQuarkCloud(params, privateCount));
-    jobs.push(searchQuark4kSources("", privatePage).catch(function () { return []; }));
-    macProviders(params.directProviderUrls, params.extraSourcesMode).forEach(function (provider) {
-      jobs.push(queryMac(provider, { ac: "detail", pg: String(privatePage) }).then(function (items) {
+    var quarkJob = listQuarkCloud(params, privateCount).catch(function () { return []; });
+    var fourKJob = searchQuark4kSources("", privatePage).catch(function () { return []; });
+    var macJobs = macProviders(params.directProviderUrls, params.extraSourcesMode).map(function (provider) {
+      return queryMac(provider, { ac: "detail", pg: String(privatePage) }).then(function (items) {
         return items.map(function (item) { return macListItem(item, provider); }).filter(Boolean);
-      }).catch(function () { return []; }));
+      }).catch(function () { return []; });
     });
-    var groups = await Promise.all(jobs);
-    var mergedItems = interleaveGroups(groups, Math.max(privateCount, 100));
-    if (!mergedItems.length) throw new Error("全部资源源暂时未返回数据，请检查网络后重试");
-    return mergedItems;
+    var settled = await Promise.all([quarkJob, fourKJob].concat(macJobs));
+    var quarkItems = settled[0] || [];
+    var fourKItems = settled[1] || [];
+    var macItems = interleaveGroups(settled.slice(2), 200);
+    // 前置顺序固定：网盘（自己的）→ 4K（高画质）→ 采集源（兜底）
+    var head = quarkItems.concat(fourKItems);
+    var mergedItems = head.concat(macItems);
+    // 去重（同 id 只留第一次出现）
+    var seenId = {}, uniqueItems = [];
+    for (var ui = 0; ui < mergedItems.length; ui += 1) {
+      var it = mergedItems[ui];
+      if (!it || !it.id || seenId[it.id]) continue;
+      seenId[it.id] = true;
+      uniqueItems.push(it);
+    }
+    if (!uniqueItems.length) throw new Error("全部资源源暂时未返回数据，请检查网络后重试");
+    return uniqueItems;
   }
   var page = Number(params.page || 1) > 0 ? Number(params.page || 1) : 1;
   var count = Number(params.count || 30) > 0 ? Number(params.count || 30) : 30;
