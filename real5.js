@@ -1,7 +1,7 @@
 WidgetMetadata = {
   id: "ibox.cloud.live2",
   title: "iBox 播放资源",
-  version: "1.6.7",
+  version: "1.6.8",
   requiredVersion: "0.0.1",
   description: "iBox 独立播放资源扩展，不替换现有内容模块",
   author: "ibox",
@@ -110,6 +110,15 @@ async function loadDetail(link) {
   }
   var context = decodeCloudLink(link);
   if (context && context.kind === "maccms") return await loadMacDetail(context);
+  // 夸克条目：详情页只需元数据与可播清单，不能抛异常（未捕获异常会导致 App 终止）
+  if (context && (context.kind === "quarkFile" || context.kind === "quark4kShare")) {
+    try {
+      return await loadQuarkDetail(context);
+    } catch (error) {
+      console.error("[iBox168] quark detail failed " + safeError(error));
+      throw error;
+    }
+  }
   if (!context || (!context.url && !context.catalogEntry)) throw new Error("详情链接无效");
 
   var html = context.catalogEntry ? "" : await httpText(context.url, context.providerUrl || context.url);
@@ -304,6 +313,8 @@ async function resourcesForOfficialItem(item,identity,params) {
 
 async function loadResource(params) {
   params=params||{};
+  // 夸克 Cookie 与百度同构：进入播放链路先持久化，避免各入口取不到值
+  quarkCookieOf(params);
   var cookie=rememberBaiduCookie(params.baiduCookie),legacy=decodeCloudLink(params.link);
   rememberEmbySetting(params.embyServers);
   if(parsePrivateLink(params.link)){
@@ -1583,7 +1594,7 @@ async function resolveQuarkStreams(cookie, fid) {
     resolutions: "normal,low,high,super,2k,4k",
     supports: "fmp4,m3u8",
   });
-  if (!data || Number(data.code) !== 0) throw new Error("夸克播放解析失败 " + String(data && data.message || ""));
+    if (!data || Number(data.code) !== 0) throw new Error("夸克播放解析失败（code=" + String(data && data.code) + " " + String(data && data.message || "") + "）；若提示登录失效，请重新填写夸克 Cookie");
   var list = (data.data && data.data.video_list) || [];
   var out = [];
   for (var i = 0; i < list.length; i++) {
@@ -1669,9 +1680,9 @@ async function searchQuarkCloud(params, keyword) {
 // 播放页：解析出可播资源
 async function loadQuarkResources(context, params) {
   var cookie = quarkCookieOf(params);
-  if (!cookie) throw new Error("夸克网盘未配置 Cookie");
+    if (!cookie) throw new Error("夸克网盘未配置 Cookie：请在模块设置里填写「夸克网盘 Cookie」");
   var streams = await resolveQuarkStreams(cookie, context.fid);
-  if (!streams.length) throw new Error("夸克未返回可播流");
+    if (!streams.length) throw new Error("夸克未返回可播流：文件可能仍在转码，请稍后再试");
   return streams.map(function (stream, index) {
     var label = stream.raw ? "原画" : (stream.resolution || "转码");
     var detail = [];
@@ -1921,7 +1932,7 @@ async function loadQuark4kResources(context, params) {
   if (!targetFid) throw new Error("已转存到「夸克影视」分类目录，请稍后在「私人片库」中打开播放");
 
   var streams = await resolveQuarkStreams(cookie, targetFid);
-  if (!streams.length) throw new Error("夸克未返回可播流");
+    if (!streams.length) throw new Error("夸克未返回可播流：文件可能仍在转码，请稍后再试");
   return streams.map(function (stream, index) {
     var label = stream.raw ? "原画" : (stream.resolution || "转码");
     var detail = [];
@@ -1988,8 +1999,8 @@ function macProviders(value, extraMode) {
     provider._rank=rank;
     // 超时实测：这批源前置 Cloudflare，首包在 2-14s 之间浮动，9s 会随机砍掉健康源。
     // 故统一放宽到 20s，仅对实测稳定快速的源保留较短超时。
-    var fastHost=/(ukuapi88|ddapi|tyyszy|hongniuzy3|360zy\.com|360zyzz|dyttzyapi|bfzyapi|apiyhzy)/;
-    provider.timeoutMs=provider.timeoutMs||(fastHost.test(host)?15000:20000);
+    // 实测：源首包 1-20s 抖动，而 Forward 列表超时远低于 20s。压到 8s：
+    provider.timeoutMs=provider.timeoutMs||8000;
   });
   providers.sort(function(a,b){return (a._rank===undefined?99:a._rank)-(b._rank===undefined?99:b._rank);});
   var seen={};return providers.filter(function(provider){var key=provider.baseUrl.replace(/\/+$/,"").toLowerCase();if(seen[key])return false;seen[key]=true;return true;});
@@ -2087,6 +2098,75 @@ async function searchCloud(params) {
     }).catch(function(){return [];}));
   });
   return interleaveGroups(await Promise.all(jobs),500);
+}
+
+// 夸克条目的详情：返回与 macccms 同构的对象，供 Forward 详情页渲染。
+// 只取元数据与清晰度清单，不做转存（转存留给点播放时执行）。
+async function loadQuarkDetail(context) {
+  var params = { quarkCookie: quarkCookieOf({}) };
+  var title = String(context.title || "").trim() || "夸克影片";
+  var poster = String(context.poster || "");
+
+  // 网盘文件：直接解析清晰度清单
+  if (context.kind === "quarkFile") {
+    var streams = [];
+    try { streams = await resolveQuarkStreams(params.quarkCookie, context.fid); } catch (error) { streams = []; }
+    var episodeItems = streams.map(function (stream, index) {
+      var label = stream.raw ? "原画" : (stream.resolution || "转码");
+      var detail = [];
+      if (stream.width && stream.height) detail.push(stream.width + "x" + stream.height);
+      return {
+        id: String(context.id || "") + "#q" + index,
+        type: "url",
+        title: label + (detail.length ? " · " + detail.join(" ") : ""),
+        season: 1,
+        episode: index + 1,
+        mediaType: context.mediaType || "movie",
+        posterPath: poster,
+        link: encodeCloudLink({
+          kind: "quarkFile",
+          fid: context.fid,
+          title: title,
+          mediaType: context.mediaType || "movie",
+        }),
+      };
+    });
+    return {
+      id: String(context.id || ""),
+      type: "url",
+      title: title,
+      description: "夸克网盘 · 共 " + streams.length + " 档清晰度",
+      posterPath: poster,
+      coverUrl: poster,
+      backdropPath: poster,
+      mediaType: context.mediaType || "movie",
+      link: encodeCloudLink(context),
+      episodeItems: episodeItems,
+    };
+  }
+
+  // 4K 分享：只展示信息，点播放时才转存
+  return {
+    id: String(context.id || ""),
+    type: "url",
+    title: title,
+    description: "夸克 4K 资源 · " + String(context.quality || "") + "\n点击播放将转存到「" + String(context.category || "其他") + "」分类目录",
+    posterPath: poster,
+    coverUrl: poster,
+    backdropPath: poster,
+    mediaType: context.mediaType || "movie",
+    link: encodeCloudLink(context),
+    episodeItems: [{
+      id: String(context.id || "") + "#play",
+      type: "url",
+      title: "转存并播放",
+      season: 1,
+      episode: 1,
+      mediaType: context.mediaType || "movie",
+      posterPath: poster,
+      link: encodeCloudLink(context),
+    }],
+  };
 }
 
 async function loadMacDetail(context) {
